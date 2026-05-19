@@ -1,59 +1,90 @@
-"""High-level pipeline combining slicer + formatter for CLI and library use."""
+"""High-level pipeline that wires slicing, filtering, formatting, and stats."""
 
 from __future__ import annotations
 
-import sys
-from datetime import datetime
-from typing import Optional, TextIO
+import io
+from typing import Optional
 
+from logslice.filter import LineFilter, make_filter
+from logslice.formatter import get_formatter, write_output
+from logslice.indexer import get_index, find_start_hint
 from logslice.slicer import slice_log
-from logslice.formatter import write_output, DEFAULT_FORMAT, SUPPORTED_FORMATS
+from logslice.stats import SliceStats
+from logslice.timestamp_parser import line_in_range
 
 
 def run_pipeline(
     log_path: str,
-    start: datetime,
-    end: datetime,
-    fmt: str = DEFAULT_FORMAT,
-    out: Optional[TextIO] = None,
-    encoding: str = "utf-8",
-) -> dict:
-    """
-    Slice *log_path* between *start* and *end*, then write formatted output.
+    start: str,
+    end: str,
+    output_stream,
+    fmt: str = "plain",
+    keyword: Optional[str] = None,
+    pattern: Optional[str] = None,
+    ignore_case: bool = False,
+    use_index: bool = True,
+    show_stats: bool = False,
+) -> SliceStats:
+    """Run the full slice → filter → format → write pipeline."""
+    stats = SliceStats()
+    stats.start()
 
-    Returns a summary dict with keys:
-      - ``lines_written`` (int)
-      - ``format`` (str)
-      - ``path`` (str)
-    """
-    if fmt not in SUPPORTED_FORMATS:
-        raise ValueError(
-            f"Unsupported format {fmt!r}. Choose from: {', '.join(SUPPORTED_FORMATS)}"
-        )
+    line_filter: Optional[LineFilter] = make_filter(
+        keyword=keyword, pattern=pattern, ignore_case=ignore_case
+    )
+    formatter = get_formatter(fmt)
 
-    if out is None:
-        out = sys.stdout
+    hint: Optional[int] = None
+    if use_index:
+        index = get_index(log_path)
+        if index:
+            hint = find_start_hint(index, start)
 
-    lines = slice_log(log_path, start, end, encoding=encoding)
-    written = write_output(lines, fmt=fmt, out=out)
+    line_number = 0
+    for line in slice_log(log_path, start, end, start_hint=hint):
+        line_number += 1
+        in_range = line_in_range(line, start, end)
+        if not in_range:
+            stats.record_line(line, matched=False)
+            continue
 
-    return {
-        "lines_written": written,
-        "format": fmt,
-        "path": log_path,
-    }
+        if line_filter is not None and not line_filter.matches(line):
+            stats.record_line(line, matched=False)
+            continue
+
+        stats.record_line(line, matched=True)
+        write_output(output_stream, formatter, line, line_number)
+
+    stats.stop()
+
+    if show_stats:
+        import json
+        output_stream.write("\n" + json.dumps(stats.as_dict(), indent=2) + "\n")
+
+    return stats
 
 
 def run_pipeline_to_string(
     log_path: str,
-    start: datetime,
-    end: datetime,
-    fmt: str = DEFAULT_FORMAT,
-    encoding: str = "utf-8",
-) -> str:
-    """Convenience wrapper that returns the formatted output as a string."""
-    import io
-
+    start: str,
+    end: str,
+    fmt: str = "plain",
+    keyword: Optional[str] = None,
+    pattern: Optional[str] = None,
+    ignore_case: bool = False,
+    use_index: bool = False,
+) -> tuple[str, SliceStats]:
+    """Convenience wrapper that captures output into a string."""
     buf = io.StringIO()
-    run_pipeline(log_path, start, end, fmt=fmt, out=buf, encoding=encoding)
-    return buf.getvalue()
+    stats = run_pipeline(
+        log_path=log_path,
+        start=start,
+        end=end,
+        output_stream=buf,
+        fmt=fmt,
+        keyword=keyword,
+        pattern=pattern,
+        ignore_case=ignore_case,
+        use_index=use_index,
+    )
+    return buf.getvalue(), stats
