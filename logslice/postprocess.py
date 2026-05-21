@@ -1,78 +1,73 @@
-"""Post-processing pipeline step: dedup + truncation applied to sliced lines.
-
-This module wires together :mod:`logslice.dedup` and :mod:`logslice.truncate`
-into a single callable that the main pipeline can use after the time-range
-slice has been produced.
-"""
+"""Postprocessor — applies dedup, truncation, and rate-limiting to matched lines."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Iterator
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Iterator, Optional, Tuple
 
-from logslice.dedup import Deduplicator, make_deduplicator
-from logslice.truncate import TruncateConfig, make_truncate_config, truncate_line
+from logslice.dedup import Deduplicator
+from logslice.truncate import TruncateConfig, apply_truncation
+from logslice.rate import RateConfig, RateLimiter
 
 
 @dataclass
 class PostprocessConfig:
-    dedup_enabled: bool = False
-    dedup_window: int | None = None
-    truncate_enabled: bool = False
-    truncate_max_length: int = 512
-    truncate_ellipsis: str = " ..."
+    dedup: bool = False
+    trunc_cfg: Optional[TruncateConfig] = None
+    rate_cfg: Optional[RateConfig] = None
 
 
+@dataclass
 class Postprocessor:
-    """Apply deduplication and/or truncation to a stream of log lines."""
+    config: PostprocessConfig
+    _dedup: Deduplicator = field(init=False, repr=False)
+    _rate: Optional[RateLimiter] = field(default=None, init=False, repr=False)
 
-    def __init__(self, cfg: PostprocessConfig) -> None:
-        self._dedup = make_deduplicator(
-            enabled=cfg.dedup_enabled,
-            window=cfg.dedup_window,
-        )
-        self._trunc_cfg = make_truncate_config(
-            enabled=cfg.truncate_enabled,
-            max_length=cfg.truncate_max_length,
-            ellipsis=cfg.truncate_ellipsis,
-        )
+    def __post_init__(self) -> None:
+        self._dedup = Deduplicator(enabled=self.config.dedup)
+        if self.config.rate_cfg is not None:
+            self._rate = RateLimiter(self.config.rate_cfg)
 
     @property
-    def dedup(self) -> Deduplicator:
-        return self._dedup
+    def dedup_stats(self):
+        return self._dedup.stats
 
     @property
-    def trunc_cfg(self) -> TruncateConfig:
-        return self._trunc_cfg
+    def rate_dropped(self) -> int:
+        return self._rate.dropped if self._rate else 0
 
-    def process(self, lines: Iterator[str]) -> Iterator[str]:
-        """Yield post-processed lines."""
-        for line in lines:
+    def process(
+        self,
+        lines: Iterator[Tuple[str, Optional[datetime]]],
+    ) -> Iterator[str]:
+        """Yield post-processed lines from (raw_line, timestamp) pairs."""
+        for line, ts in lines:
+            # 1. dedup
             if self._dedup.is_duplicate(line):
                 continue
-            yield truncate_line(line, self._trunc_cfg)
+            # 2. rate limit
+            if self._rate is not None and not self._rate.allow(ts):
+                continue
+            # 3. truncation
+            if self.config.trunc_cfg is not None:
+                line = apply_truncation(line, self.config.trunc_cfg)
+            yield line
 
 
-def make_postprocessor(cfg: PostprocessConfig | None = None) -> Postprocessor:
-    """Return a :class:`Postprocessor`, using defaults when *cfg* is None."""
-    return Postprocessor(cfg or PostprocessConfig())
-
-
-def postprocess_lines(
-    lines: Iterator[str],
-    *,
+def make_postprocessor(
     dedup: bool = False,
-    dedup_window: int | None = None,
-    truncate: bool = False,
-    max_length: int = 512,
-    ellipsis: str = " ...",
-) -> Iterator[str]:
-    """Convenience wrapper for one-shot use without constructing config objects."""
-    cfg = PostprocessConfig(
-        dedup_enabled=dedup,
-        dedup_window=dedup_window,
-        truncate_enabled=truncate,
-        truncate_max_length=max_length,
-        truncate_ellipsis=ellipsis,
+    max_length: int = 0,
+    rate_max_lines: int = 0,
+    rate_bucket_seconds: int = 1,
+) -> Postprocessor:
+    from logslice.truncate import make_truncate_config
+    from logslice.rate import make_rate_config
+
+    trunc = make_truncate_config(max_length=max_length) if max_length > 0 else None
+    rate = (
+        make_rate_config(max_lines=rate_max_lines, bucket_seconds=rate_bucket_seconds)
+        if rate_max_lines > 0
+        else None
     )
-    return make_postprocessor(cfg).process(lines)
+    return Postprocessor(PostprocessConfig(dedup=dedup, trunc_cfg=trunc, rate_cfg=rate))
