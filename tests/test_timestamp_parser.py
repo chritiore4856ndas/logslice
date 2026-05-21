@@ -42,6 +42,12 @@ class TestParseTimestamp:
     def test_empty_line(self):
         assert parse_timestamp("") is None
 
+    def test_at_boundary_exact_minute(self):
+        """Timestamps should parse correctly down to the second."""
+        line = "2024-06-30T23:59:59 INFO shutdown complete"
+        ts = parse_timestamp(line)
+        assert ts == datetime(2024, 6, 30, 23, 59, 59)
+
 
 class TestLineInRange:
     START = datetime(2024, 1, 15, 10, 0, 0)
@@ -59,6 +65,16 @@ class TestLineInRange:
         line = "2024-01-15T12:00:01 INFO late"
         assert line_in_range(line, self.START, self.END) is False
 
+    def test_at_start_boundary(self):
+        """A line exactly at the start boundary should be included."""
+        line = "2024-01-15T10:00:00 INFO at start"
+        assert line_in_range(line, self.START, self.END) is True
+
+    def test_at_end_boundary(self):
+        """A line exactly at the end boundary should be included."""
+        line = "2024-01-15T12:00:00 INFO at end"
+        assert line_in_range(line, self.START, self.END) is True
+
     def test_no_timestamp_returns_none(self):
         line = "    traceback line without timestamp"
         assert line_in_range(line, self.START, self.END) is None
@@ -70,3 +86,8 @@ class TestLineInRange:
     def test_open_ended_end_only(self):
         line = "2024-01-15T00:00:01 INFO early morning"
         assert line_in_range(line, None, self.END) is True
+
+    def test_both_none_with_timestamp(self):
+        """With no bounds at all, any line with a timestamp should be in range."""
+        line = "2024-01-15T11:00:00 INFO anything goes"
+        assert line_in_range(line, None, None) is True
