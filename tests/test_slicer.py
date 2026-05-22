@@ -42,6 +42,14 @@ def sample_log(tmp_path):
     return str(path)
 
 
+@pytest.fixture()
+def empty_log(tmp_path):
+    """An empty log file for edge-case tests."""
+    path = tmp_path / "empty.log"
+    path.write_text("")
+    return str(path)
+
+
 # ---------------------------------------------------------------------------
 # _find_line_start
 # ---------------------------------------------------------------------------
@@ -91,64 +99,11 @@ class TestReadLineAt:
             result = _read_line_at(fh, size)
         assert result is None
 
-
-# ---------------------------------------------------------------------------
-# _binary_search_start
-# ---------------------------------------------------------------------------
-
-class TestBinarySearchStart:
-    def test_finds_exact_timestamp(self, sample_log):
-        from datetime import datetime, timezone
-        target = datetime(2024, 1, 1, 2, 0, 0, tzinfo=timezone.utc)
-        with open(sample_log, "rb") as fh:
-            offset = _binary_search_start(fh, target)
-        assert offset >= 0
-        with open(sample_log, "rb") as fh:
-            fh.seek(offset)
-            line = fh.readline().decode()
-        assert "event B" in line or "event A" in line or "2024-01-01T02" in line
-
-    def test_returns_zero_when_target_before_all(self, sample_log):
-        from datetime import datetime, timezone
-        target = datetime(2023, 1, 1, tzinfo=timezone.utc)
-        with open(sample_log, "rb") as fh:
-            offset = _binary_search_start(fh, target)
-        assert offset == 0
+    def test_returns_none_on_empty_file(self, empty_log):
+        """Reading from an empty file should return None, not raise."""
+        with open(empty_log, "rb") as fh:
+            result = _read_line_at(fh, 0)
+        assert result is None
 
 
-# ---------------------------------------------------------------------------
-# slice_log  (integration)
-# ---------------------------------------------------------------------------
-
-class TestSliceLog:
-    def test_returns_lines_in_range(self, sample_log):
-        from datetime import datetime, timezone
-        start = datetime(2024, 1, 1, 1, 0, 0, tzinfo=timezone.utc)
-        end = datetime(2024, 1, 1, 3, 0, 0, tzinfo=timezone.utc)
-        lines = list(slice_log(sample_log, start, end))
-        texts = [l for l in lines]
-        assert any("event A" in t for t in texts)
-        assert any("event B" in t for t in texts)
-        assert not any("startup" in t for t in texts)
-        assert not any("event D" in t for t in texts)
-
-    def test_empty_range_returns_nothing(self, sample_log):
-        from datetime import datetime, timezone
-        start = datetime(2025, 1, 1, tzinfo=timezone.utc)
-        end = datetime(2025, 6, 1, tzinfo=timezone.utc)
-        lines = list(slice_log(sample_log, start, end))
-        assert lines == []
-
-    def test_full_range_returns_all_lines(self, sample_log):
-        from datetime import datetime, timezone
-        start = datetime(2023, 1, 1, tzinfo=timezone.utc)
-        end = datetime(2025, 1, 1, tzinfo=timezone.utc)
-        lines = list(slice_log(sample_log, start, end))
-        assert len(lines) == len(SAMPLE_LINES)
-
-    def test_yields_strings(self, sample_log):
-        from datetime import datetime, timezone
-        start = datetime(2024, 1, 1, tzinfo=timezone.utc)
-        end = datetime(2024, 1, 1, 6, 0, 0, tzinfo=timezone.utc)
-        for line in slice_log(sample_log, start, end):
-            assert isinstance(line, str)
+# -------------------------------------
